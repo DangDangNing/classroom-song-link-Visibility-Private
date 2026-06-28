@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>点歌管理</title>
+  <style>
+    :root{font-family:"Microsoft YaHei",Arial,sans-serif;color:#19332e;background:#f3f7f2}
+    body{margin:0;padding:28px;box-sizing:border-box}
+    .card{max-width:880px;margin:auto;background:#fff;border-radius:20px;padding:30px;box-shadow:0 16px 48px #173d3020}
+    header{display:flex;justify-content:space-between;gap:18px;align-items:center;flex-wrap:wrap}
+    h1{margin:0}p{color:#61736e}
+    .toolbar,.controls{display:flex;gap:10px;flex-wrap:wrap}
+    button{font:inherit;font-weight:700;border:0;border-radius:10px;padding:11px 15px;background:#176b56;color:white;cursor:pointer}
+    button.alt{background:#e6f0eb;color:#174a3d}
+    .now{margin:20px 0;padding:16px;border-radius:12px;background:#edf6f1}
+    .now strong{display:block;margin-bottom:6px}
+    .queue{padding:0;list-style:none;display:grid;gap:10px}
+    .queue li{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:15px;background:#f4f8f5;border-radius:12px}
+    .queue li.done{opacity:.6}
+    .queue small{display:block;color:#687871;margin-top:5px}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}
+    .empty{color:#687871;text-align:center;padding:28px!important}
+    .error{color:#b42318}
+    audio{width:100%;margin-top:12px}
+    @media(max-width:600px){body{padding:15px}.card{padding:20px}.queue li{align-items:stretch;flex-direction:column}.actions button{flex:1}}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <header>
+      <div>
+        <h1>点歌队列</h1>
+        <p>老师在这里查看队列，系统会按歌名自动搜索公开音乐预览。</p>
+      </div>
+      <div class="toolbar">
+        <button class="alt" id="refresh">刷新</button>
+        <button class="alt" id="clear">清掉已播</button>
+      </div>
+    </header>
+
+    <section class="now">
+      <strong id="now-title">尚未开始播放</strong>
+      <span id="status">点击一次开始自动播放。</span>
+      <audio id="audio" controls></audio>
+    </section>
+
+    <div class="controls">
+      <button id="auto-toggle">开始自动播放</button>
+      <button class="alt" id="pause">暂停 / 继续</button>
+      <button class="alt" id="skip">跳过当前歌曲</button>
+    </div>
+
+    <ol class="queue" id="queue"></ol>
+  </main>
+
+  <script>
+    const queue=document.querySelector('#queue'),audio=document.querySelector('#audio'),status=document.querySelector('#status'),nowTitle=document.querySelector('#now-title');
+    let songs=[],auto=false,current=null;
+
+    async function searchPreview(query){
+      const url='https://itunes.apple.com/search?term='+encodeURIComponent(query)+'&entity=song&limit=1&country=CN';
+      const response=await fetch(url);
+      if(!response.ok)throw new Error('搜索服务暂不可用');
+      const data=await response.json();
+      const song=data.results&&data.results.find(item=>item.previewUrl);
+      if(!song)throw new Error('未找到可播放预览');
+      return song;
+    }
+
+    async function finish(id){
+      await fetch('/api/done',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+encodeURIComponent(id)});
+      current=null;
+      await load();
+    }
+
+    async function playSong(song){
+      current=song.id;
+      status.className='';
+      nowTitle.textContent='正在搜索：'+song.title;
+      status.textContent='正在查找公开预览音源...';
+      try{
+        const result=await searchPreview(song.title);
+        nowTitle.textContent='正在播放：'+result.trackName+(result.artistName?' - '+result.artistName:'');
+        status.textContent='公开预览 · '+(result.collectionName||'');
+        audio.src=result.previewUrl;
+        await audio.play();
+      }catch(error){
+        status.className='error';
+        status.textContent='“'+song.title+'”'+(error.message||'无法播放，已跳过。');
+        setTimeout(()=>finish(song.id),1200);
+      }
+    }
+
+    function next(){
+      if(!auto||current)return;
+      const song=[...songs].filter(item=>!item.done).sort((a,b)=>a.id-b.id)[0];
+      if(!song){
+        nowTitle.textContent='队列已播放完';
+        status.className='';
+        status.textContent='等待同学继续点歌。';
+        return;
+      }
+      playSong(song);
+    }
+
+    function makeButton(text,action){
+      const button=document.createElement('button');
+      button.textContent=text;
+      button.onclick=action;
+      return button;
+    }
+
+    function render(){
+      queue.replaceChildren();
+      if(!songs.length){
+        const li=document.createElement('li');
+        li.className='empty';
+        li.textContent='还没有人点歌。';
+        queue.append(li);
+        return;
+      }
+      songs.forEach(song=>{
+        const li=document.createElement('li');
+        if(song.done)li.className='done';
+        const info=document.createElement('div'),title=document.createElement('strong'),meta=document.createElement('small'),actions=document.createElement('div');
+        title.textContent=song.title;
+        meta.textContent=(song.requester||'匿名')+' 点的'+(song.id===current?' · 正在处理':'');
+        info.append(title,meta);
+        actions.className='actions';
+        if(!song.done){
+          actions.append(makeButton('播放',()=>playSong(song)));
+          actions.append(makeButton('完成',()=>finish(song.id)));
+        }else{
+          const tag=document.createElement('span');
+          tag.textContent='已播';
+          actions.append(tag);
+        }
+        li.append(info,actions);
+        queue.append(li);
+      });
+    }
+
+    async function load(){
+      const response=await fetch('/api/songs');
+      songs=await response.json();
+      render();
+      next();
+    }
+
+    audio.onended=()=>{if(current)finish(current)};
+    audio.onerror=()=>{if(current)finish(current)};
+    const autoToggle=document.querySelector('#auto-toggle');
+    autoToggle.onclick=()=>{
+      auto=!auto;
+      status.className='';
+      if(auto){
+        autoToggle.textContent='停止自动播放';
+        status.textContent='自动播放已启动。';
+        next();
+      }else{
+        audio.pause();
+        autoToggle.textContent='开始自动播放';
+        status.textContent='自动播放已停止。';
+      }
+    };
+    document.querySelector('#pause').onclick=()=>audio.paused?audio.play():audio.pause();
+    document.querySelector('#skip').onclick=()=>{if(current){audio.pause();finish(current)}};
+    document.querySelector('#refresh').onclick=load;
+    document.querySelector('#clear').onclick=async()=>{await fetch('/api/clear',{method:'POST'});load()};
+    load();
+    setInterval(load,5000);
+  </script>
+</body>
+</html>
